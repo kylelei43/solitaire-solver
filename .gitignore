@@ -1,4 +1,5 @@
-src/tb_solitaire
+tb_solitaire
 .venv
 src/__pycache__
 .idea
+*.zip
