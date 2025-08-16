@@ -1,0 +1,4 @@
+src/tb_solitaire
+.venv
+src/__pycache__
+.idea
