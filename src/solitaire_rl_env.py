@@ -1,4 +1,5 @@
 import random
+from collections import deque
 
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple, List
@@ -110,6 +111,8 @@ class KlondikeSolitaireEnv(gym.Env):
         self.stock: List[int] = []  # face-down stack (top at end)
         self.waste: List[int] = []  # face-up stack (top at end)
         self.steps = 0
+        self.steps_since_progress = 0
+        self.history_states = deque(maxlen=10)
 
     # --------------- Game Setup ---------------
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -135,6 +138,7 @@ class KlondikeSolitaireEnv(gym.Env):
         self.waste = []
         self.foundations = [0, 0, 0, 0]
         self.steps = 0
+        self.steps_since_progress = 0
 
         obs = self._obs()
         info = {"action_mask": self._action_mask()}
@@ -143,33 +147,47 @@ class KlondikeSolitaireEnv(gym.Env):
     # --------------- Step Logic ---------------
     def step(self, action: int):
         self.steps += 1
-        reward = -0.01  # step penalty
+        reward = -0.1  # step penalty
         done = False
         truncated = False
         info: Dict = {}
 
         prev_foundation_sum = sum(self.foundations)
         prev_face_down = self._count_face_down()
+        prev_stock_sum = len(self.stock) + len(self.waste)
+        prev_obs = self._obs()
+        self.history_states.append(prev_obs)
 
         changed = self._apply_action(action)
         if not changed:
-            reward -= 0.05  # illegal/no-op small penalty
+            reward -= 5.0  # illegal/no-op small penalty
         else:
             # Auto flip if needed
             flipped = self._auto_flip()
             if flipped:
-                reward += 0.5
+                reward += 3.0
 
         # Foundation progress reward
         delta_found = sum(self.foundations) - prev_foundation_sum
-        reward += 1.0 * delta_found
+        reward += 5.0 * delta_found
+
+        delta_stock = prev_stock_sum - (len(self.stock) + len(self.waste))
+        reward += 1.0 * delta_stock
+
+        if delta_found > 0:
+            self.steps_since_progress = 0
+        else:
+            self.steps_since_progress += 1
+            if self.steps_since_progress >= 10:
+                # Gradually increase penalty as we get further from progress
+                reward -= 1.0 * self.steps_since_progress / 100
 
         # King-to-empty small reward (detected within _apply_action and returned flag?)
         # Simplify: heuristically reward if any empty pile exists AND a King is bottom of a moved run onto it.
         # We mark this in self._last_move_was_king_to_empty
-        if getattr(self, "_last_move_was_king_to_empty", False):
-            reward += 0.2
-            self._last_move_was_king_to_empty = False
+        # if getattr(self, "_last_move_was_king_to_empty", False):
+        #     reward += 0.2
+        #     self._last_move_was_king_to_empty = False
 
         if self._is_win():
             reward += 100.0
@@ -178,7 +196,14 @@ class KlondikeSolitaireEnv(gym.Env):
         if self.steps >= self.step_limit:
             truncated = True
 
+        if self.steps_since_progress >= 100:
+            # Too many steps without progress
+            truncated = True
+
         obs = self._obs()
+        if self._is_repeat_state(obs):
+            reward -= 1.0
+
         info["action_mask"] = self._action_mask()
         info["face_down"] = self._count_face_down()
         info["foundation_sum"] = sum(self.foundations)
@@ -452,6 +477,17 @@ class KlondikeSolitaireEnv(gym.Env):
         cid = pile.face_up[-1]
         suit, rank = id_to_card(cid)
         return rank == self.foundations[suit] + 1
+
+    def _is_repeat_state(self, obs: Dict[str, np.ndarray]) -> bool:
+        for hist_obs in self.history_states:
+            match = True
+            for key in obs:
+                if key != "steps" and not np.array_equal(obs[key], hist_obs[key]):
+                    match = False
+                    break
+            if match:
+                return True
+        return False
 
     # Convenience for quick random interaction
     def sample_legal_action(self, info: Optional[Dict] = None) -> int:

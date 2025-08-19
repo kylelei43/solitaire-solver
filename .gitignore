@@ -3,3 +3,4 @@ tb_solitaire
 src/__pycache__
 .idea
 *.zip
+*.pt
