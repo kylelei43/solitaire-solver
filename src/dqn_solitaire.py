@@ -119,6 +119,16 @@ def select_action(qnet, obs_vec, mask_np, eps, device):
     if len(legal_idxs) == 0:
         raise ValueError("No legal actions")
     if random.random() < eps:
+        # Bias exploration toward clearly good moves
+        foundation_moves = []
+        if mask_np[1]:  # waste -> foundation
+            foundation_moves.append(1)
+        for i in range(7):
+            a = 9 + i  # tableau -> foundation offset
+            if mask_np[a]:
+                foundation_moves.append(a)
+        if foundation_moves:
+            return int(random.choice(foundation_moves))
         return int(random.choice(legal_idxs))
 
     with torch.no_grad():
@@ -185,7 +195,7 @@ def train(max_steps: int = 500_000):
 
     buffer = PrioritizedReplayBuffer(capacity=20_000)
 
-    epsilon_start, epsilon_end, epsilon_decay_steps = 1.0, 0.05, 100_000
+    epsilon_start, epsilon_end, epsilon_decay_steps = 1.0, 0.02, 50_000
 
     def beta_by_step(step, beta_start=0.4, beta_frames=100_000):
         t = min(1.0, step / beta_frames)
@@ -203,10 +213,10 @@ def train(max_steps: int = 500_000):
 
     gamma = 0.99
     batch_size = 512
-    warmup = 20_000
+    warmup = 5_000
     target_evaluate_interval = 5000  # steps
-    train_every = 10  # learn every N env steps
-    gradient_steps = 5  # G updates per learn call
+    train_every = 5  # learn every N env steps
+    gradient_steps = 10  # G updates per learn call
 
     obs, info = env.reset()
     obs_vec = flatten_obs(obs)
