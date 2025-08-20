@@ -147,7 +147,7 @@ class KlondikeSolitaireEnv(gym.Env):
     # --------------- Step Logic ---------------
     def step(self, action: int):
         self.steps += 1
-        reward = -0.1  # step penalty
+        reward = -0.01  # reduced step penalty
         done = False
         truncated = False
         info: Dict = {}
@@ -160,12 +160,12 @@ class KlondikeSolitaireEnv(gym.Env):
 
         changed = self._apply_action(action)
         if not changed:
-            reward -= 5.0  # illegal/no-op small penalty
+            reward -= 1.0  # soften illegal/no-op penalty
         else:
             # Auto flip if needed
             flipped = self._auto_flip()
             if flipped:
-                reward += 3.0
+                reward += 5.0  # larger reward for revealing new cards
 
         # Foundation progress reward
         delta_found = sum(self.foundations) - prev_foundation_sum
@@ -173,6 +173,10 @@ class KlondikeSolitaireEnv(gym.Env):
 
         delta_stock = prev_stock_sum - (len(self.stock) + len(self.waste))
         reward += 1.0 * delta_stock
+
+        # Reward for reducing face-down cards (encourages uncovering)
+        delta_face_down = prev_face_down - self._count_face_down()
+        reward += 2.0 * delta_face_down
 
         if delta_found > 0:
             self.steps_since_progress = 0

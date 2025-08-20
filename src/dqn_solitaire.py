@@ -1,5 +1,5 @@
 import random
-from collections import namedtuple, deque
+from collections import namedtuple
 
 import gymnasium as gym
 import numpy as np
@@ -75,16 +75,39 @@ class DuelingQ(nn.Module):
         a = self.A(h)
         return v + (a - a.mean(dim=1, keepdim=True))
 
-class ReplayBuffer:
-    def __init__(self, capacity: int):
-        self.buf = deque(maxlen=capacity)
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity: int, alpha: float = 0.6):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.buf = []
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.pos = 0
 
     def push(self, *args):
-        self.buf.append(Transition(*args))
+        max_prio = self.priorities.max() if self.buf else 1.0
+        if len(self.buf) < self.capacity:
+            self.buf.append(Transition(*args))
+        else:
+            self.buf[self.pos] = Transition(*args)
+        self.priorities[self.pos] = max_prio
+        self.pos = (self.pos + 1) % self.capacity
 
-    def sample(self, batch_size: int):
-        batch = random.sample(self.buf, batch_size)
-        return Transition(*zip(*batch))
+    def sample(self, batch_size: int, beta: float = 0.4):
+        if len(self.buf) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:self.pos]
+        probs = prios ** self.alpha
+        probs = probs / probs.sum()
+        indices = np.random.choice(len(self.buf), batch_size, p=probs)
+        samples = [self.buf[idx] for idx in indices]
+        weights = (len(self.buf) * probs[indices]) ** (-beta)
+        weights = weights / weights.max()
+        batch = Transition(*zip(*samples))
+        return batch, indices, torch.tensor(weights, dtype=torch.float32)
+
+    def update_priorities(self, indices, priorities):
+        self.priorities[indices] = priorities
 
     def __len__(self):
         return len(self.buf)
@@ -105,7 +128,7 @@ def select_action(qnet, obs_vec, mask_np, eps, device):
         a = masked_argmax(q, mask).item()
         return int(a)
 
-def dqn_train_step(batch, qnet, target_qnet, optimizer, gamma, device, double_dqn: bool = True):
+def dqn_train_step(batch, weights, qnet, target_qnet, optimizer, gamma, device, double_dqn: bool = True):
     obs = torch.tensor(np.array(batch.obs), dtype=torch.float32, device=device)
     act = torch.tensor(np.array(batch.action), dtype=torch.long,    device=device)
     rew = torch.tensor(np.array(batch.reward), dtype=torch.float32, device=device)
@@ -131,12 +154,13 @@ def dqn_train_step(batch, qnet, target_qnet, optimizer, gamma, device, double_dq
 
         target = rew + gamma * (1.0 - done) * q_next_max  # (B,)
 
-    loss = nn.functional.smooth_l1_loss(q_sa, target)
+    td_error = q_sa - target
+    loss = (weights * nn.functional.smooth_l1_loss(q_sa, target, reduction="none")).mean()
     optimizer.zero_grad()
     loss.backward()
     nn.utils.clip_grad_norm_(qnet.parameters(), 5.0)
     optimizer.step()
-    return loss.item()
+    return loss.item(), td_error.detach().cpu().numpy()
 
 def mask_fn(env):
     return env._action_mask()
@@ -146,7 +170,7 @@ def make_env(seed=0) -> gym.Env:
     # ActionMasker ensures info['action_mask'] is always present for us to store
     return ActionMasker(env, mask_fn)
 
-def train():
+def train(max_steps: int = 500_000):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     env = make_env(0)
 
@@ -159,9 +183,13 @@ def train():
     target_qnet.load_state_dict(qnet.state_dict())
     optimizer = optim.Adam(qnet.parameters(), lr=3e-4)
 
-    buffer = ReplayBuffer(capacity=20_000)
+    buffer = PrioritizedReplayBuffer(capacity=20_000)
 
-    epsilon_start, epsilon_end, epsilon_decay_steps = 1.0, 0.2, 100_000
+    epsilon_start, epsilon_end, epsilon_decay_steps = 1.0, 0.05, 100_000
+
+    def beta_by_step(step, beta_start=0.4, beta_frames=100_000):
+        t = min(1.0, step / beta_frames)
+        return beta_start + t * (1.0 - beta_start)
 
 
     def epsilon(iters):  # linear decay
@@ -179,7 +207,6 @@ def train():
     target_evaluate_interval = 5000  # steps
     train_every = 10  # learn every N env steps
     gradient_steps = 5  # G updates per learn call
-    max_steps = 500_000
 
     obs, info = env.reset()
     obs_vec = flatten_obs(obs)
@@ -225,8 +252,10 @@ def train():
         if len(buffer) >= warmup and (global_step % train_every == 0):
             losses = []
             for _ in range(gradient_steps):
-                batch = buffer.sample(batch_size)
-                loss = dqn_train_step(batch, qnet, target_qnet, optimizer, gamma, device, double_dqn=True)
+                batch, indices, weights = buffer.sample(batch_size, beta=beta_by_step(global_step))
+                weights = weights.to(device)
+                loss, td_err = dqn_train_step(batch, weights, qnet, target_qnet, optimizer, gamma, device, double_dqn=True)
+                buffer.update_priorities(indices, np.abs(td_err) + 1e-6)
                 losses.append(loss)
 
             if global_step % 1000 == 0:
