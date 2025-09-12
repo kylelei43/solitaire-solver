@@ -43,6 +43,35 @@ import numpy as np
 
 from solitaire_rl_env import KlondikeSolitaireEnv
 
+def evaluate(model, n_episodes=100, seed=1, auto_play=True):
+    wins, sums, rewards = 0, [], []
+    for ep in range(n_episodes):
+        env = KlondikeSolitaireEnv(seed=seed + ep)
+
+        obs, info = env.reset()
+        done = False
+        truncated = False
+        total_reward = 0.0
+
+        while not (done or truncated):
+            mask = info.get("action_mask")
+            action, _ = model.predict(obs, action_masks=mask)
+            obs, reward, done, truncated, info = env.step(action)
+            total_reward += reward
+
+            print(env.render())
+            print(f"step={env.steps} reward={reward:.2f} total={total_reward:.2f}")
+            if not auto_play:
+                input("Press Enter to continue...")
+
+        env.close()
+        print(f"Finished after {env.steps} steps, total reward {total_reward:.2f}")
+        wins += (sum(env.foundations) == 52)
+        sums.append(info.get("foundation_sum", 0))
+        rewards.append(total_reward)
+    print(f"Eval: win_rate={wins / n_episodes:.2f}, avg_foundation_sum={np.mean(sums):.1f}, "
+          f"avg_reward={np.mean(rewards):.1f}")
+
 # -------------------------
 # Optional: SB3-Contrib MaskablePPO Training Scaffold
 # -------------------------
@@ -89,6 +118,6 @@ if __name__ == "__main__":
 
     print("Starting training...")
     model.learn(total_timesteps=200_000)
-    model.save("ppo_klondike_masked.zip")
-    print("Saved model to ppo_klondike_masked.zip")
-
+    # model.save("ppo_klondike_masked.zip")
+    # print("Saved model to ppo_klondike_masked.zip")
+    evaluate(model, auto_play=True)
